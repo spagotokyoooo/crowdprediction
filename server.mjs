@@ -1,4 +1,5 @@
 import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 
@@ -14,6 +15,13 @@ const store = {
 const cache = {
   weather: { value: null, expiresAt: 0 },
   venues: { value: null, expiresAt: 0 },
+};
+const processedLineEvents = new Set();
+const lineConfig = {
+  channelSecret: process.env.LINE_CHANNEL_SECRET || '',
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || '',
+  destinationId: process.env.LINE_DESTINATION_ID || '',
+  cronSecret: process.env.CRON_SECRET || '',
 };
 
 const contentTypes = {
@@ -68,6 +76,127 @@ function sendJson(response, body, status = 200) {
     'Cache-Control': 'no-store',
   });
   response.end(JSON.stringify(body));
+}
+
+function readBody(request) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => resolve(Buffer.concat(chunks)));
+    request.on('error', reject);
+  });
+}
+
+function japanDate(offsetDays = 0) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date()).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  const date = new Date(`${parts.year}-${parts.month}-${parts.day}T12:00:00+09:00`);
+  date.setDate(date.getDate() + offsetDays);
+  return date.toISOString().slice(0, 10);
+}
+
+function lineDateLabel(date) {
+  const value = new Date(`${date}T12:00:00+09:00`);
+  return `${value.getMonth() + 1}/${value.getDate()}（${['日', '月', '火', '水', '木', '金', '土'][value.getDay()]}）`;
+}
+
+function crowdText(delta) {
+  return ({ '-2': 'かなり少なそう', '-1': '少なそう', 0: 'いつも通り', 1: '混みそう', 2: 'かなり混みそう' })[delta];
+}
+
+function crowdDelta(score) {
+  if (score <= -1.25) return -2;
+  if (score <= -0.4) return -1;
+  if (score < 0.4) return 0;
+  if (score < 1.25) return 1;
+  return 2;
+}
+
+async function buildDailyLineMessage(date) {
+  const weekday = new Date(`${date}T12:00:00+09:00`).getDay();
+  if (weekday === 0) return `${lineDateLabel(date)}のSPAGO\n\n本日は定休日です。\n来週の予報は日曜朝にお送りします。`;
+  const [weather, venues] = await Promise.all([getWeather(), getVenues()]);
+  const slots = weather.hourly.filter((slot) => slot.date === date && [11, 13, 15, 17, 19, 21].includes(slot.hour));
+  const weatherScore = slots.length ? Math.min(...slots.map((slot) => slot.score)) : 0;
+  const event = venues.events.find((item) => item.date === date);
+  const score = weatherScore + (event?.time ? 0.95 : 0);
+  const delta = crowdDelta(score);
+  const weatherSlot = slots.find((slot) => slot.score === weatherScore) || slots[0];
+  const summary = delta === 0 ? 'いつも通り' : `通常より${crowdText(delta)}`;
+  const lines = [
+    `${lineDateLabel(date)}のSPAGO`,
+    '',
+    `結論：${summary}（${delta > 0 ? '+' : ''}${delta}）`,
+  ];
+  if (event) lines.push(`🎤 ${event.venue} ${event.time ? `${event.time}開始` : '時刻確認中'}`);
+  if (weatherSlot) lines.push(`☼ ${weatherSlot.label} / ${Math.round(weatherSlot.temperature)}°C`);
+  if (event && !event.time) lines.push('※ イベント時刻の確認後に混雑時間へ反映します。');
+  return lines.join('\n');
+}
+
+async function buildWeeklyLineMessage() {
+  const lines = ['来週のSPAGO｜要注意日'];
+  for (let offset = 1; offset <= 7; offset += 1) {
+    const date = japanDate(offset);
+    const weekday = new Date(`${date}T12:00:00+09:00`).getDay();
+    if (weekday === 0) {
+      lines.push(`${lineDateLabel(date)}　定休日`);
+      continue;
+    }
+    const message = await buildDailyLineMessage(date);
+    const conclusion = message.split('\n')[2]?.replace('結論：', '') || '確認中';
+    if (!conclusion.startsWith('いつも通り')) lines.push(`${lineDateLabel(date)}　${conclusion}`);
+  }
+  return lines.length === 1 ? `${lines[0]}\n\n現在、大きな変動要因は確認されていません。` : lines.join('\n');
+}
+
+function verifyLineSignature(rawBody, signature) {
+  if (!lineConfig.channelSecret || !signature) return false;
+  const expected = createHmac('sha256', lineConfig.channelSecret).update(rawBody).digest('base64');
+  const expectedBuffer = Buffer.from(expected);
+  const signatureBuffer = Buffer.from(signature);
+  return expectedBuffer.length === signatureBuffer.length && timingSafeEqual(expectedBuffer, signatureBuffer);
+}
+
+async function callLine(endpoint, body) {
+  if (!lineConfig.channelAccessToken) return { sent: false, reason: 'LINE_CHANNEL_ACCESS_TOKEN is not configured' };
+  const response = await fetch(`https://api.line.me/v2/bot/message/${endpoint}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${lineConfig.channelAccessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`LINE API HTTP ${response.status}: ${await response.text()}`);
+  return { sent: true };
+}
+
+async function replyLine(replyToken, text) {
+  return callLine('reply', { replyToken, messages: [{ type: 'text', text }] });
+}
+
+async function pushLine(to, text) {
+  return callLine('push', { to, messages: [{ type: 'text', text }] });
+}
+
+async function handleLineEvent(event) {
+  if (!event.webhookEventId || processedLineEvents.has(event.webhookEventId)) return;
+  processedLineEvents.add(event.webhookEventId);
+  if (processedLineEvents.size > 1000) processedLineEvents.clear();
+  if (event.type === 'postback' && event.replyToken) {
+    await replyLine(event.replyToken, '記録しました。予報の補正に活用します。');
+    return;
+  }
+  if (event.type !== 'message' || event.message?.type !== 'text' || !event.replyToken) return;
+  const input = event.message.text.trim();
+  if (input.includes('今日') || input.includes('きょう')) {
+    await replyLine(event.replyToken, await buildDailyLineMessage(japanDate()));
+  } else if (input.includes('明日') || input.includes('あした')) {
+    await replyLine(event.replyToken, await buildDailyLineMessage(japanDate(1)));
+  } else if (input.includes('今週') || input.includes('来週')) {
+    await replyLine(event.replyToken, await buildWeeklyLineMessage());
+  } else {
+    await replyLine(event.replyToken, '「今日」「明日」「今週」と送ると、SPAGOの通常比予報を返します。');
+  }
 }
 
 function compactText(html) {
@@ -234,6 +363,59 @@ async function getVenues() {
 
 createServer(async (request, response) => {
   const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+  if (pathname === '/webhook/line' && request.method === 'POST') {
+    try {
+      const rawBody = await readBody(request);
+      if (!verifyLineSignature(rawBody, request.headers['x-line-signature'])) {
+        response.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+        response.end('Invalid LINE signature');
+        return;
+      }
+      const payload = JSON.parse(rawBody.toString('utf8'));
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end('{}');
+      Promise.allSettled((payload.events || []).map(handleLineEvent));
+    } catch (error) {
+      sendJson(response, { error: 'LINE webhookを処理できませんでした。', detail: error.message }, 400);
+    }
+    return;
+  }
+  if (pathname === '/api/line/status') {
+    sendJson(response, {
+      webhookReady: Boolean(lineConfig.channelSecret),
+      pushReady: Boolean(lineConfig.channelAccessToken && lineConfig.destinationId),
+      cronReady: Boolean(lineConfig.cronSecret),
+    });
+    return;
+  }
+  if (pathname === '/api/line/preview') {
+    try {
+      const period = new URL(request.url, `http://${request.headers.host}`).searchParams.get('period');
+      sendJson(response, { text: period === 'week' ? await buildWeeklyLineMessage() : await buildDailyLineMessage(japanDate()) });
+    } catch (error) {
+      sendJson(response, { error: 'LINE通知文を生成できませんでした。', detail: error.message }, 502);
+    }
+    return;
+  }
+  if (pathname === '/api/jobs/morning' && request.method === 'POST') {
+    if (!lineConfig.cronSecret || request.headers.authorization !== `Bearer ${lineConfig.cronSecret}`) {
+      sendJson(response, { error: 'Unauthorized' }, 401);
+      return;
+    }
+    if (!lineConfig.destinationId) {
+      sendJson(response, { error: 'LINE_DESTINATION_ID is not configured' }, 503);
+      return;
+    }
+    try {
+      const date = japanDate();
+      const isSunday = new Date(`${date}T12:00:00+09:00`).getDay() === 0;
+      const text = isSunday ? `${await buildDailyLineMessage(date)}\n\n${await buildWeeklyLineMessage()}` : await buildDailyLineMessage(date);
+      sendJson(response, { ...(await pushLine(lineConfig.destinationId, text)), date, weekly: isSunday });
+    } catch (error) {
+      sendJson(response, { error: 'LINE朝通知を送信できませんでした。', detail: error.message }, 502);
+    }
+    return;
+  }
   if (pathname === '/api/weather') {
     try {
       sendJson(response, await getWeather());

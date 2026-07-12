@@ -24,11 +24,20 @@ npm run dev
 - LINE通知文のプレビュー
 - 手動イベント登録のデモ
 - 予報フィードバックのデモ
+- LINE Webhookの署名検証、重複イベント抑止、「今日／明日／今週」への応答
+- スケジューラから呼べる朝のPush通知エンドポイント
 
 ## 次に接続するもの
 
-1. LINE Messaging APIのWebhookと朝のPush通知
-2. 会場ごとのイベント時刻・規模取得アダプターの強化
-3. 予報・イベント・フィードバックを保存するデータベース
+1. 会場ごとのイベント時刻・規模取得アダプターの強化
+2. 予報・イベント・フィードバックを保存するデータベース
+
+## LINEを有効化する
+
+1. `.env.example` を `.env` としてコピーし、LINE Developers Consoleの値を設定する。
+2. 本番の公開URLに `/webhook/line` を付け、LINEのWebhook URLに登録する。
+3. ホスティング側のスケジューラから、毎朝8:00（Asia/Tokyo）に `POST /api/jobs/morning` を呼ぶ。リクエストには `Authorization: Bearer {CRON_SECRET}` を付ける。
+
+ローカルで通知文だけ確認する場合は `GET /api/line/preview`、週間版は `GET /api/line/preview?period=week` を利用できます。実際のLINE送信は、アクセストークンと通知先IDを設定するまで実行されません。
 
 実装方針と運用ルールは [PLAN.md](./PLAN.md) を参照してください。
