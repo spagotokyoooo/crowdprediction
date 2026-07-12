@@ -41,9 +41,13 @@
             <p class="eyebrow">CROWD FORECAST / DEMO</p>
             <h1>通常からの<span>変化</span>を読む。</h1>
           </div>
-          <button class="button secondary" id="event-button" type="button">
-            <span aria-hidden="true">＋</span> イベントを追加
-          </button>
+          <div class="sync-controls">
+            <span class="data-status loading" id="data-status">ライブデータを取得中</span>
+            <button class="button text-action" id="refresh-button" type="button">更新</button>
+            <button class="button secondary" id="event-button" type="button">
+              <span aria-hidden="true">＋</span> イベントを追加
+            </button>
+          </div>
         </header>
 
         <section class="date-switcher" aria-label="予報日を選択">
@@ -109,6 +113,17 @@
           </aside>
         </section>
 
+        <section class="venue-monitor" aria-labelledby="venue-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">VENUE MONITOR</p>
+              <h2 id="venue-title">監視中の会場</h2>
+            </div>
+            <p>公式情報から確認しています。自動で時刻を取得できない会場は、LINEまたは上部ボタンから追加できます。</p>
+          </div>
+          <div class="venue-list" id="venue-list"></div>
+        </section>
+
         <section class="feedback-section" id="feedback" aria-labelledby="feedback-title">
           <div>
             <p class="eyebrow">YESTERDAY / FEEDBACK</p>
@@ -154,4 +169,3 @@
     <script type="module" src="./app.js"></script>
   </body>
 </html>
-

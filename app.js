@@ -3,11 +3,11 @@ const dayNames = ['日', '月', '火', '水', '木', '金', '土'];
 const forecastData = {
   '2026-07-13': {
     weather: { label: '晴れのち曇り', temp: '30°C', score: 0, confidence: '高' },
-    events: [{ venue: '国立競技場', title: 'サンプル：夜間スポーツイベント', time: '18:00', scale: 'large', score: 1.35 }],
+    events: [{ venue: '国立競技場', title: 'サンプル：夜間スポーツイベント', time: '18:00', scale: 'large', score: 1.35, demo: true }],
   },
   '2026-07-14': {
     weather: { label: '弱い雨', temp: '26°C', score: -0.25, confidence: '中' },
-    events: [{ venue: '東京体育館', title: 'サンプル：アリーナイベント', time: '19:00', scale: 'medium', score: 0.95 }],
+    events: [{ venue: '東京体育館', title: 'サンプル：アリーナイベント', time: '19:00', scale: 'medium', score: 0.95, demo: true }],
   },
   '2026-07-15': {
     weather: { label: '晴れ', temp: '31°C', score: -0.1, confidence: '高' },
@@ -20,13 +20,13 @@ const forecastData = {
   '2026-07-17': {
     weather: { label: '晴れ', temp: '29°C', score: 0, confidence: '高' },
     events: [
-      { venue: '国立代々木競技場', title: 'サンプル：ライブイベント', time: '18:30', scale: 'large', score: 1.45 },
-      { venue: 'WITH HARAJUKU HALL', title: 'サンプル：展示イベント', time: '11:00', scale: 'small', score: 0.35 },
+      { venue: '国立代々木競技場', title: 'サンプル：ライブイベント', time: '18:30', scale: 'large', score: 1.45, demo: true },
+      { venue: 'WITH HARAJUKU HALL', title: 'サンプル：展示イベント', time: '11:00', scale: 'small', score: 0.35, demo: true },
     ],
   },
   '2026-07-18': {
     weather: { label: '強い雨', temp: '24°C', score: -1.0, confidence: '中' },
-    events: [{ venue: '明治神宮野球場', title: 'サンプル：野球イベント', time: '18:00', scale: 'large', score: 1.1 }],
+    events: [{ venue: '明治神宮野球場', title: 'サンプル：野球イベント', time: '18:00', scale: 'large', score: 1.1, demo: true }],
   },
   '2026-07-19': { closed: true },
 };
@@ -45,11 +45,21 @@ const elements = {
   drivers: document.querySelector('#driver-list'),
   lineBubble: document.querySelector('#line-bubble'),
   feedback: document.querySelector('#feedback-confirmation'),
+  dataStatus: document.querySelector('#data-status'),
+  refresh: document.querySelector('#refresh-button'),
+  venues: document.querySelector('#venue-list'),
   dialog: document.querySelector('#event-dialog'),
   form: document.querySelector('#event-form'),
 };
 
 let activeDate = '2026-07-13';
+let venueSources = [];
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>'"]/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
+  })[character]);
+}
 
 function formatDate(dateString) {
   const date = new Date(`${dateString}T12:00:00`);
@@ -57,6 +67,7 @@ function formatDate(dateString) {
 }
 
 function eventScoreForSlot(event, hour) {
+  if (event.unknownTime) return 0;
   const [startHour, startMinute] = event.time.split(':').map(Number);
   const start = startHour + startMinute / 60;
   if (hour >= start - 1.5 && hour < start) return event.score * 0.7;
@@ -108,12 +119,13 @@ function getForecast(date) {
 
 function reasonText(day, forecast) {
   if (!day.events.length) {
-    if (day.weather.score <= -0.2) return `${day.weather.label}の影響で、通常より人流が落ち着く見込みです。`;
+    if (forecast.delta < 0) return `${day.weather.label}の影響で、通常より人流が落ち着く見込みです。`;
     return '大きく影響しそうな天気・近隣イベントはありません。';
   }
+  const primary = [...day.events].sort((a, b) => b.score - a.score)[0];
+  if (primary.unknownTime) return `${primary.venue}でイベントが予定されています。開始・終了時刻の確認後に通常比へ反映します。`;
   if (forecast.delta < 0) return `${day.weather.label}の影響で、通常より人流が落ち着く見込みです。`;
   const peak = forecast.highlighted.at(-1) || forecast.strongest;
-  const primary = [...day.events].sort((a, b) => b.score - a.score)[0];
   return `${primary.venue}のイベント後、${String(peak.hour).padStart(2, '0')}:00頃に人流の増加が見込まれます。`;
 }
 
@@ -150,9 +162,10 @@ function renderSlots(forecast) {
 }
 
 function renderDrivers(day) {
-  const weatherTone = day.weather.score < -0.2 ? 'negative' : 'neutral';
-  const weatherImpact = day.weather.score < -0.2 ? '−' : '±';
-  const weatherText = day.weather.score < -0.2 ? '人流をやや抑える見込み' : '大きな補正なし';
+  const weatherDelta = getDelta(day.weather.score);
+  const weatherTone = weatherDelta < 0 ? 'negative' : 'neutral';
+  const weatherImpact = weatherDelta < 0 ? '−' : '±';
+  const weatherText = weatherDelta < 0 ? '人流をやや抑える見込み' : '大きな補正なし';
   const weather = `<article class="driver-row">
     <div class="driver-symbol weather ${weatherTone}">☼</div>
     <div><strong>天気　${day.weather.label} / ${day.weather.temp}</strong><p>${weatherText}</p></div>
@@ -160,8 +173,8 @@ function renderDrivers(day) {
   </article>`;
   const events = day.events.map((event) => `<article class="driver-row">
     <div class="driver-symbol event">⌁</div>
-    <div><strong>${event.venue}</strong><p>${event.time}開始 · ${scaleText(event.scale)} · ${event.title}</p></div>
-    <b>＋</b>
+    <div><strong>${escapeHtml(event.venue)}</strong><p>${escapeHtml(event.timeLabel || `${event.time}開始`)} · ${scaleText(event.scale)} · ${escapeHtml(event.title)}</p></div>
+    <b>${event.score > 0 ? '＋' : '…'}</b>
   </article>`).join('');
   elements.drivers.innerHTML = weather + (events || '<p class="empty-state event-empty">登録済みの近隣イベントはありません。</p>');
 }
@@ -170,8 +183,9 @@ function renderLinePreview(date, day, forecast) {
   const monthDay = new Date(`${date}T12:00:00`);
   const dateLabel = `${monthDay.getMonth() + 1}/${monthDay.getDate()}（${dayNames[monthDay.getDay()]}）`;
   const notable = forecast.highlighted.filter((slot) => slot.delta > 0);
-  const time = notable.length ? `${String(notable[0].hour).padStart(2, '0')}:00〜${String(notable.at(-1).hour + 2).padStart(2, '0')}:00` : '終日';
-  const eventLine = day.events.length ? `\n🎤 ${day.events[0].venue} ${day.events[0].time}開始` : '';
+  const hasUnknownTimeEvent = day.events.some((event) => event.unknownTime);
+  const time = hasUnknownTimeEvent ? '確認中' : notable.length ? `${String(notable[0].hour).padStart(2, '0')}:00〜${String(notable.at(-1).hour + 2).padStart(2, '0')}:00` : '終日';
+  const eventLine = day.events.length ? `\n🎤 ${escapeHtml(day.events[0].venue)} ${escapeHtml(day.events[0].timeLabel || `${day.events[0].time}開始`)}` : '';
   const weatherLine = `\n☼ ${day.weather.label} / ${day.weather.temp}`;
   const conclusion = forecast.delta === 0 ? 'いつも通り' : `通常より${deltaText(forecast.delta)}`;
   elements.lineBubble.innerHTML = `<strong>${dateLabel}のSPAGO</strong><br><br>結論：${conclusion}（${forecast.delta > 0 ? '+' : ''}${forecast.delta}）<br>注意時間：${time}${eventLine}${weatherLine}<br><br><span>※ サンプルデータによるプレビュー</span>`;
@@ -221,6 +235,7 @@ elements.form.addEventListener('submit', (event) => {
     time: form.get('time'),
     scale,
     score: ({ small: 0.45, medium: 0.95, large: 1.45 })[scale],
+    manual: true,
   });
   elements.dialog.close();
   render(date);
@@ -237,4 +252,90 @@ document.querySelectorAll('[data-feedback]').forEach((button) => button.addEvent
   elements.feedback.textContent = messages[button.dataset.feedback];
 }));
 
+function renderVenues(sources) {
+  venueSources = sources;
+  elements.venues.innerHTML = sources.map((source) => {
+    const isConnected = source.status === 'connected';
+    const eventLabel = source.events.length ? `${source.events.length}件を検出` : '予定を確認中';
+    return `<a class="venue-row" href="${escapeHtml(source.url)}" target="_blank" rel="noreferrer">
+      <span class="source-dot ${isConnected ? 'connected' : 'manual'}"></span>
+      <strong>${escapeHtml(source.name)}</strong>
+      <small>${escapeHtml(source.note)}</small>
+      <em>${isConnected ? eventLabel : '公式ページを確認'} ↗</em>
+    </a>`;
+  }).join('');
+}
+
+function setDataStatus(message, tone = 'loading') {
+  elements.dataStatus.textContent = message;
+  elements.dataStatus.className = `data-status ${tone}`;
+}
+
+function applyWeather(weather) {
+  for (const date of Object.keys(forecastData)) {
+    if (forecastData[date].closed) continue;
+    const daySlots = weather.hourly.filter((slot) => date === slot.date && [11, 13, 15, 17, 19, 21].includes(slot.hour));
+    if (!daySlots.length) continue;
+    const evening = daySlots.find((slot) => slot.hour === 17) || daySlots[0];
+    const impactSlot = [...daySlots].sort((first, second) => first.score - second.score)[0];
+    forecastData[date].weather = {
+      label: impactSlot.score < 0 ? impactSlot.label : evening.label,
+      temp: `${Math.round(evening.temperature)}°C`,
+      score: Math.min(...daySlots.map((slot) => slot.score)),
+      confidence: '高',
+      source: weather.source,
+    };
+  }
+}
+
+function applyOfficialEvents(events) {
+  for (const date of Object.keys(forecastData)) {
+    if (forecastData[date].closed) continue;
+    const retained = forecastData[date].events.filter((event) => !event.demo && !event.official);
+    const official = events
+      .filter((event) => event.date === date)
+      .map((event) => ({
+        venue: event.venue,
+        title: event.title,
+        time: event.time || '18:00',
+        timeLabel: event.time ? `${event.time}開始` : '時刻確認中',
+        scale: event.scale || 'medium',
+        score: event.time ? 0.95 : 0,
+        unknownTime: !event.time,
+        official: true,
+      }));
+    forecastData[date].events = [...retained, ...official];
+  }
+}
+
+async function refreshLiveData() {
+  setDataStatus('ライブデータを取得中', 'loading');
+  elements.refresh.disabled = true;
+  try {
+    const [weatherResponse, venueResponse] = await Promise.all([fetch('/api/weather'), fetch('/api/venues')]);
+    const [weatherPayload, venuePayload] = await Promise.all([weatherResponse.json(), venueResponse.json()]);
+    if (!weatherResponse.ok) throw new Error(weatherPayload.error || '天気情報の取得に失敗しました。');
+    if (!venueResponse.ok) throw new Error(venuePayload.error || '会場情報の取得に失敗しました。');
+    applyWeather(weatherPayload);
+    applyOfficialEvents(venuePayload.events);
+    renderVenues(venuePayload.sources);
+    render(activeDate);
+    setDataStatus('天気・会場を更新済み', 'live');
+  } catch (error) {
+    if (!venueSources.length) {
+      renderVenues([
+        { name: '東京体育館', url: 'https://www.tef.or.jp/tmg/', note: '大会・イベント日程', status: 'manual', events: [] },
+        { name: '明治神宮野球場', url: 'https://www.jingu-stadium.com/', note: '当日スケジュール', status: 'manual', events: [] },
+        { name: '国立代々木競技場', url: 'https://www.jpnsport.go.jp/yoyogi/tabid/58/default.aspx', note: '第一・第二体育館の公式情報', status: 'manual', events: [] },
+      ]);
+    }
+    setDataStatus('ライブ取得に失敗 — サンプル表示中', 'error');
+    console.error(error);
+  } finally {
+    elements.refresh.disabled = false;
+  }
+}
+
+elements.refresh.addEventListener('click', refreshLiveData);
 render(activeDate);
+refreshLiveData();
