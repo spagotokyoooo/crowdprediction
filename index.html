@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#fcfaf6" />
+    <title>SPAGO — Crowd signal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Noto+Sans+JP:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#top" aria-label="SPAGO Crowd signal home">
+          <span class="brand-mark">S</span>
+          <span>
+            <strong>SPAGO</strong>
+            <small>Crowd signal</small>
+          </span>
+        </a>
+
+        <nav aria-label="メインメニュー">
+          <a class="nav-item active" href="#top"><span>01</span>予報</a>
+          <a class="nav-item" href="#events"><span>02</span>近隣イベント</a>
+          <a class="nav-item" href="#feedback"><span>03</span>振り返り</a>
+        </nav>
+
+        <section class="store-summary">
+          <p class="eyebrow">LOCATION</p>
+          <strong>SPAGO 原宿</strong>
+          <p>渋谷区神宮前 2-35-9<br />原宿リビン</p>
+          <span class="closed-badge">SUN / CLOSED</span>
+        </section>
+      </aside>
+
+      <section class="workspace" id="top">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">CROWD FORECAST / DEMO</p>
+            <h1>通常からの<span>変化</span>を読む。</h1>
+          </div>
+          <button class="button secondary" id="event-button" type="button">
+            <span aria-hidden="true">＋</span> イベントを追加
+          </button>
+        </header>
+
+        <section class="date-switcher" aria-label="予報日を選択">
+          <button class="day-tab active" data-date="2026-07-13" type="button"><small>MON</small><strong>13</strong></button>
+          <button class="day-tab" data-date="2026-07-14" type="button"><small>TUE</small><strong>14</strong></button>
+          <button class="day-tab" data-date="2026-07-15" type="button"><small>WED</small><strong>15</strong></button>
+          <button class="day-tab" data-date="2026-07-16" type="button"><small>THU</small><strong>16</strong></button>
+          <button class="day-tab" data-date="2026-07-17" type="button"><small>FRI</small><strong>17</strong></button>
+          <button class="day-tab" data-date="2026-07-18" type="button"><small>SAT</small><strong>18</strong></button>
+          <button class="day-tab closed" data-date="2026-07-19" type="button"><small>SUN</small><strong>19</strong></button>
+        </section>
+
+        <section class="forecast-overview" aria-live="polite">
+          <div class="forecast-copy">
+            <p class="eyebrow" id="forecast-date">2026.07.13 / MONDAY</p>
+            <p class="forecast-label" id="forecast-label">通常より</p>
+            <div class="forecast-title"><strong id="forecast-value">混みそう</strong><span id="forecast-delta">+1</span></div>
+            <p class="forecast-detail" id="forecast-detail">18:00以降、近隣イベントの終了後に人流の増加が見込まれます。</p>
+          </div>
+          <div class="signal-meter" aria-label="通常比の5段階スケール">
+            <div class="meter-line"></div>
+            <div class="meter-points">
+              <span data-level="-2"><i></i><b>-2</b></span>
+              <span data-level="-1"><i></i><b>-1</b></span>
+              <span data-level="0"><i></i><b>0</b></span>
+              <span data-level="1"><i></i><b>+1</b></span>
+              <span data-level="2"><i></i><b>+2</b></span>
+            </div>
+            <p><span id="confidence-dot"></span><span id="confidence-label">確度：中</span></p>
+          </div>
+        </section>
+
+        <section class="slots-section" aria-labelledby="slots-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">TIME WINDOW</p>
+              <h2 id="slots-title">時間帯ごとのシグナル</h2>
+            </div>
+            <p id="slots-summary">外部要因が強い時間を表示しています。</p>
+          </div>
+          <div class="slot-list" id="slot-list"></div>
+        </section>
+
+        <section class="lower-grid">
+          <section class="drivers-section" id="events" aria-labelledby="drivers-title">
+            <div class="section-heading compact">
+              <div>
+                <p class="eyebrow">WHY TODAY</p>
+                <h2 id="drivers-title">変動の根拠</h2>
+              </div>
+              <button class="text-button" id="all-events-button" type="button">すべて見る →</button>
+            </div>
+            <div class="driver-list" id="driver-list"></div>
+          </section>
+
+          <aside class="line-preview" aria-labelledby="line-title">
+            <div class="line-heading">
+              <div class="line-icon" aria-hidden="true">L</div>
+              <div><p class="eyebrow">NOTIFICATION</p><h2 id="line-title">LINE通知プレビュー</h2></div>
+            </div>
+            <div class="line-bubble" id="line-bubble"></div>
+            <p class="line-note">毎朝 8:00 にスタッフグループへ送信</p>
+          </aside>
+        </section>
+
+        <section class="feedback-section" id="feedback" aria-labelledby="feedback-title">
+          <div>
+            <p class="eyebrow">YESTERDAY / FEEDBACK</p>
+            <h2 id="feedback-title">昨日の予報はどうでしたか？</h2>
+          </div>
+          <div class="feedback-actions" role="group" aria-label="昨日の予報を評価">
+            <button data-feedback="higher" type="button">予報より混んだ</button>
+            <button data-feedback="accurate" type="button">だいたい合っていた</button>
+            <button data-feedback="lower" type="button">予報より少なかった</button>
+          </div>
+          <p class="feedback-confirmation" id="feedback-confirmation" aria-live="polite"></p>
+        </section>
+      </section>
+    </main>
+
+    <dialog class="event-dialog" id="event-dialog" aria-labelledby="event-dialog-title">
+      <form method="dialog" id="event-form">
+        <div class="dialog-header">
+          <div>
+            <p class="eyebrow">MANUAL EVENT</p>
+            <h2 id="event-dialog-title">イベントを追加</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="閉じる" type="submit">×</button>
+        </div>
+        <label>会場<input required name="venue" placeholder="例：国立競技場" /></label>
+        <label>イベント名<input required name="title" placeholder="例：サッカー大会" /></label>
+        <div class="form-row">
+          <label>日付<input required name="date" type="date" value="2026-07-13" /></label>
+          <label>開始時刻<input required name="time" type="time" value="18:00" /></label>
+        </div>
+        <label>規模
+          <select name="scale">
+            <option value="small">小規模</option>
+            <option value="medium" selected>中規模</option>
+            <option value="large">大規模</option>
+          </select>
+        </label>
+        <p class="form-note">登録後、該当日の通常比とLINEプレビューにすぐ反映されます。</p>
+        <button class="button primary" value="submit" type="submit">追加して予報を更新</button>
+      </form>
+    </dialog>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
+
