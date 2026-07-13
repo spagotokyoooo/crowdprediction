@@ -119,19 +119,32 @@ async function buildDailyLineMessage(date) {
   const [weather, venues] = await Promise.all([getWeather(), getVenues()]);
   const slots = weather.hourly.filter((slot) => slot.date === date && [11, 13, 15, 17, 19, 21].includes(slot.hour));
   const weatherScore = slots.length ? Math.min(...slots.map((slot) => slot.score)) : 0;
-  const event = venues.events.find((item) => item.date === date);
+  const events = venues.events.filter((item) => item.date === date);
+  const event = events[0];
   const score = weatherScore + (event?.time ? 0.95 : 0);
   const delta = crowdDelta(score);
   const weatherSlot = slots.find((slot) => slot.score === weatherScore) || slots[0];
   const summary = delta === 0 ? 'いつも通り' : `通常より${crowdText(delta)}`;
+  const eventTime = event?.time ? Number(event.time.slice(0, 2)) : null;
+  const attentionTime = eventTime && delta > 0
+    ? `${String(eventTime + 2).padStart(2, '0')}:00〜${String(eventTime + 4).padStart(2, '0')}:00`
+    : event && !event.time ? 'イベント時刻を確認中'
+      : '特になし';
+  const weatherImpact = weatherScore <= -0.4 ? '人流が落ち着く可能性があります' : '大きな補正はありません';
   const lines = [
-    `${lineDateLabel(date)}のSPAGO`,
+    `${lineDateLabel(date)}｜SPAGO混雑予報`,
     '',
-    `結論：${summary}（${delta > 0 ? '+' : ''}${delta}）`,
+    `結論　${summary}（${delta > 0 ? '+' : ''}${delta}）`,
+    `注意時間　${attentionTime}`,
+    '',
+    `天気　${weatherSlot ? `${weatherSlot.label} / ${Math.round(weatherSlot.temperature)}°C` : '取得中'}`,
+    `影響　${weatherImpact}`,
   ];
-  if (event) lines.push(`🎤 ${event.venue} ${event.time ? `${event.time}開始` : '時刻確認中'}`);
-  if (weatherSlot) lines.push(`☼ ${weatherSlot.label} / ${Math.round(weatherSlot.temperature)}°C`);
-  if (event && !event.time) lines.push('※ イベント時刻の確認後に混雑時間へ反映します。');
+  lines.push('', '近隣イベント');
+  if (event) lines.push(`・${event.venue} ${event.time ? `${event.time}開始` : '時刻確認中'}`);
+  else lines.push('・大きく影響しそうなイベントはありません');
+  if (event && !event.time) lines.push('※ 開始・終了時刻の確認後に、混雑時間へ反映します。');
+  lines.push('', '確度　中');
   return lines.join('\n');
 }
 
@@ -171,7 +184,20 @@ async function callLine(endpoint, body) {
 }
 
 async function replyLine(replyToken, text) {
-  return callLine('reply', { replyToken, messages: [{ type: 'text', text }] });
+  return callLine('reply', {
+    replyToken,
+    messages: [{
+      type: 'text',
+      text,
+      quickReply: {
+        items: [
+          { type: 'action', action: { type: 'message', label: '今日', text: '今日' } },
+          { type: 'action', action: { type: 'message', label: '明日', text: '明日' } },
+          { type: 'action', action: { type: 'message', label: '今週', text: '今週' } },
+        ],
+      },
+    }],
+  });
 }
 
 async function pushLine(to, text) {
