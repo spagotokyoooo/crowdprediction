@@ -1,12 +1,10 @@
 import { createReadStream, existsSync, statSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 
 const root = process.cwd();
 const port = Number(process.env.PORT || 4173);
-const feedbackFile = join(root, 'data', 'feedback.json');
 const store = {
   name: 'SPAGO 原宿',
   latitude: 35.6757,
@@ -20,7 +18,6 @@ const cache = {
   venues: { value: null, expiresAt: 0 },
 };
 const processedLineEvents = new Set();
-let feedbackCache = null;
 const lineConfig = {
   channelSecret: process.env.LINE_CHANNEL_SECRET || '',
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || '',
@@ -117,35 +114,6 @@ function crowdDelta(score) {
   return 2;
 }
 
-const feedbackPeriods = [
-  { id: 'lunch', label: 'ランチ', time: '11:30〜14:00' },
-  { id: 'afternoon', label: '午後', time: '14:00〜17:00' },
-  { id: 'night', label: '夜', time: '17:00〜21:00' },
-];
-
-async function loadFeedback() {
-  if (feedbackCache) return feedbackCache;
-  try {
-    const saved = JSON.parse(await readFile(feedbackFile, 'utf8'));
-    feedbackCache = Array.isArray(saved) ? saved : [];
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-    feedbackCache = [];
-  }
-  return feedbackCache;
-}
-
-async function saveFeedback(record) {
-  const feedback = await loadFeedback();
-  const existingIndex = feedback.findIndex((item) => item.date === record.date && item.period === record.period && item.sourceId === record.sourceId);
-  if (existingIndex >= 0) feedback[existingIndex] = record;
-  else feedback.push(record);
-  await mkdir(join(root, 'data'), { recursive: true });
-  const temporaryFile = `${feedbackFile}.${process.pid}.tmp`;
-  await writeFile(temporaryFile, JSON.stringify(feedback, null, 2), 'utf8');
-  await rename(temporaryFile, feedbackFile);
-}
-
 function baselineFor(date) {
   const weekday = new Date(`${date}T12:00:00+09:00`).getDay();
   if (weekday === 0) return [];
@@ -229,21 +197,40 @@ async function buildDailyLineMessage(date) {
   return lines.join('\n');
 }
 
-async function buildWeeklyLineMessage() {
-  const lines = ['来週のSPAGO｜要注意日'];
-  for (let offset = 1; offset <= 7; offset += 1) {
+function weekOffsets(period) {
+  const weekday = new Date(`${japanDate()}T12:00:00+09:00`).getDay();
+  if (period === 'next') {
+    const nextMonday = weekday === 0 ? 1 : 8 - weekday;
+    return Array.from({ length: 6 }, (_, index) => nextMonday + index);
+  }
+  if (weekday === 0) return [];
+  return Array.from({ length: 7 - weekday }, (_, index) => index);
+}
+
+async function buildWeeklyLineMessage(period = 'current') {
+  const title = period === 'next' ? '来週のSPAGO｜営業日予報' : '今週のSPAGO｜営業日予報';
+  const offsets = weekOffsets(period);
+  if (!offsets.length) return `${title}\n\n今週の営業は終了しました。来週の予報は「来週」で確認できます。`;
+  const weather = await getWeather();
+  const weatherDates = new Set(weather.hourly.map((slot) => slot.date));
+  const lines = [title];
+  for (const offset of offsets) {
     const date = japanDate(offset);
-    const weekday = new Date(`${date}T12:00:00+09:00`).getDay();
-    if (weekday === 0) {
-      lines.push(`${lineDateLabel(date)}　定休日`);
+    const baseline = baselineFor(date);
+    if (!weatherDates.has(date)) {
+      lines.push(`${lineDateLabel(date)}　ランチ ${baseline[0].level} / 夜 ${baseline.at(-1).level}（天気予報待ち）`);
       continue;
     }
-    if (weekday === 6) lines.push(`${lineDateLabel(date)}　通常：週で最も混みやすい日`);
     const message = await buildDailyLineMessage(date);
-    const lunchForecast = message.split('\n').find((line) => line.startsWith('予報　')) || '予報　確認中';
-    if (!lunchForecast.includes('いつも通り')) lines.push(`${lineDateLabel(date)} ランチ　${lunchForecast.replace('予報　', '')}`);
+    const forecasts = message.split('\n').filter((line) => line.startsWith('予報　')).map((line) => line.replace('予報　', ''));
+    const lunchChange = forecasts[0] || '確認中';
+    const nightChange = forecasts[1] || '確認中';
+    const lunch = `${baseline[0].level}${lunchChange === 'いつも通り' ? '' : `（${lunchChange}）`}`;
+    const night = `${baseline.at(-1).level}${nightChange === 'いつも通り' ? '' : `（${nightChange}）`}`;
+    lines.push(`${lineDateLabel(date)}　ランチ ${lunch} / 夜 ${night}`);
   }
-  return lines.length === 1 ? `${lines[0]}\n\n現在、大きな変動要因は確認されていません。` : lines.join('\n');
+  lines.push('', '※ 土曜は通常でも週で最も混みやすい日です。');
+  return lines.join('\n');
 }
 
 function verifyLineSignature(rawBody, signature) {
@@ -265,36 +252,10 @@ async function callLine(endpoint, body) {
   return { sent: true };
 }
 
-function feedbackQuickReplies(date, period) {
-  return [
-    { label: '空いていた', value: -1 },
-    { label: 'いつも通り', value: 0 },
-    { label: '混んでいた', value: 1 },
-  ].map(({ label, value }) => ({
-    type: 'action',
-    action: {
-      type: 'postback',
-      label,
-      displayText: `${period.label}：${label}`,
-      data: new URLSearchParams({ action: 'feedback', date, period: period.id, level: String(value) }).toString(),
-    },
-  }));
-}
-
-function buildFeedbackMessage(date, period, prefix = '') {
-  return {
-    type: 'text',
-    text: `${prefix}${lineDateLabel(date)}の実際の混雑を教えてください。\n\n${period.label}（${period.time}）はどうでしたか？`,
-    quickReply: { items: feedbackQuickReplies(date, period) },
-  };
-}
-
-async function replyLineMessage(replyToken, message) {
-  return callLine('reply', { replyToken, messages: [message] });
-}
-
 async function replyLine(replyToken, text) {
-  return replyLineMessage(replyToken, {
+  return callLine('reply', {
+    replyToken,
+    messages: [{
       type: 'text',
       text,
       quickReply: {
@@ -302,8 +263,10 @@ async function replyLine(replyToken, text) {
           { type: 'action', action: { type: 'message', label: '今日', text: '今日' } },
           { type: 'action', action: { type: 'message', label: '明日', text: '明日' } },
           { type: 'action', action: { type: 'message', label: '今週', text: '今週' } },
+          { type: 'action', action: { type: 'message', label: '来週', text: '来週' } },
         ],
       },
+    }],
   });
 }
 
@@ -319,41 +282,12 @@ async function sendMorningLine(text) {
   return lineConfig.destinationId ? pushLine(lineConfig.destinationId, text) : broadcastLine(text);
 }
 
-async function sendFeedbackLine(message) {
-  if (lineConfig.destinationId) return callLine('push', { to: lineConfig.destinationId, messages: [message] });
-  return callLine('broadcast', { messages: [message] });
-}
-
 async function handleLineEvent(event) {
   if (!event.webhookEventId || processedLineEvents.has(event.webhookEventId)) return;
   processedLineEvents.add(event.webhookEventId);
   if (processedLineEvents.size > 1000) processedLineEvents.clear();
   if (event.type === 'postback' && event.replyToken) {
-    const data = new URLSearchParams(event.postback?.data || '');
-    if (data.get('action') !== 'feedback') {
-      await replyLine(event.replyToken, '記録しました。予報の補正に活用します。');
-      return;
-    }
-    const periodIndex = feedbackPeriods.findIndex((period) => period.id === data.get('period'));
-    const level = Number(data.get('level'));
-    const date = data.get('date');
-    if (periodIndex < 0 || !date || ![-1, 0, 1].includes(level)) {
-      await replyLine(event.replyToken, '回答を読み取れませんでした。もう一度お試しください。');
-      return;
-    }
-    await saveFeedback({
-      date,
-      period: feedbackPeriods[periodIndex].id,
-      level,
-      sourceId: event.source?.userId || event.source?.groupId || 'line-user',
-      answeredAt: new Date().toISOString(),
-    });
-    const nextPeriod = feedbackPeriods[periodIndex + 1];
-    if (nextPeriod) {
-      await replyLineMessage(event.replyToken, buildFeedbackMessage(date, nextPeriod, `${feedbackPeriods[periodIndex].label}を記録しました。ありがとうございます。\n\n`));
-    } else {
-      await replyLine(event.replyToken, '今日の振り返りを記録しました。ありがとうございます。明日の予報づくりに活用します。');
-    }
+    await replyLine(event.replyToken, '記録しました。予報の補正に活用します。');
     return;
   }
   if (event.type !== 'message' || event.message?.type !== 'text' || !event.replyToken) return;
@@ -362,10 +296,12 @@ async function handleLineEvent(event) {
     await replyLine(event.replyToken, await buildDailyLineMessage(japanDate()));
   } else if (input.includes('明日') || input.includes('あした')) {
     await replyLine(event.replyToken, await buildDailyLineMessage(japanDate(1)));
-  } else if (input.includes('今週') || input.includes('来週')) {
-    await replyLine(event.replyToken, await buildWeeklyLineMessage());
+  } else if (input.includes('来週')) {
+    await replyLine(event.replyToken, await buildWeeklyLineMessage('next'));
+  } else if (input.includes('今週')) {
+    await replyLine(event.replyToken, await buildWeeklyLineMessage('current'));
   } else {
-    await replyLine(event.replyToken, '「今日」「明日」「今週」と送ると、SPAGOの混雑予報を返します。ランチと夜の予報は「今日」「明日」の中に表示されます。');
+    await replyLine(event.replyToken, '「今日」「明日」「今週」「来週」と送ると、SPAGOの混雑予報を返します。ランチと夜の予報は「今日」「明日」の中に表示されます。');
   }
 }
 
@@ -556,7 +492,6 @@ createServer(async (request, response) => {
       deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast',
       notificationReady: Boolean(lineConfig.channelAccessToken),
       cronReady: Boolean(lineConfig.cronSecret),
-      feedbackStorage: 'temporary-file',
     });
     return;
   }
@@ -564,19 +499,11 @@ createServer(async (request, response) => {
     try {
       const period = new URL(request.url, `http://${request.headers.host}`).searchParams.get('period');
       const today = japanDate();
-      const text = period === 'week' ? await buildWeeklyLineMessage() : await buildDailyLineMessage(today);
+      const text = period === 'week' ? await buildWeeklyLineMessage('current') : period === 'next-week' ? await buildWeeklyLineMessage('next') : await buildDailyLineMessage(today);
       sendJson(response, { text });
     } catch (error) {
       sendJson(response, { error: 'LINE通知文を生成できませんでした。', detail: error.message }, 502);
     }
-    return;
-  }
-  if (pathname === '/api/line/feedback-preview') {
-    const date = japanDate();
-    sendJson(response, {
-      text: buildFeedbackMessage(date, feedbackPeriods[0]).text,
-      choices: feedbackQuickReplies(date, feedbackPeriods[0]).map((item) => item.action.label),
-    });
     return;
   }
   if (pathname === '/api/jobs/morning' && request.method === 'POST') {
@@ -595,27 +522,6 @@ createServer(async (request, response) => {
       sendJson(response, { ...(await sendMorningLine(text)), date, weekly: isSunday, deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast' });
     } catch (error) {
       sendJson(response, { error: 'LINE朝通知を送信できませんでした。', detail: error.message }, 502);
-    }
-    return;
-  }
-  if (pathname === '/api/jobs/evening-feedback' && request.method === 'POST') {
-    if (!lineConfig.cronSecret || request.headers.authorization !== `Bearer ${lineConfig.cronSecret}`) {
-      sendJson(response, { error: 'Unauthorized' }, 401);
-      return;
-    }
-    if (!lineConfig.channelAccessToken) {
-      sendJson(response, { error: 'LINE_CHANNEL_ACCESS_TOKEN is not configured' }, 503);
-      return;
-    }
-    const date = japanDate();
-    if (new Date(`${date}T12:00:00+09:00`).getDay() === 0) {
-      sendJson(response, { sent: false, skipped: 'closed', date });
-      return;
-    }
-    try {
-      sendJson(response, { ...(await sendFeedbackLine(buildFeedbackMessage(date, feedbackPeriods[0]))), date, deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast' });
-    } catch (error) {
-      sendJson(response, { error: 'LINE振り返り通知を送信できませんでした。', detail: error.message }, 502);
     }
     return;
   }
