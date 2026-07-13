@@ -131,8 +131,23 @@ function baselineFor(date) {
   ];
 }
 
-function baselineLine(date) {
-  return baselineFor(date).map((slot) => `${slot.time}　${slot.level}`).join('\n');
+function hourFromTime(value) {
+  const match = value?.match(/^(\d{1,2}):(\d{2})/);
+  return match ? Number(match[1]) + Number(match[2]) / 60 : null;
+}
+
+function periodForecast(slot, weatherSlots, event) {
+  const [start, end] = slot.time.split('〜').map(hourFromTime);
+  const relevantWeather = weatherSlots.filter((weather) => weather.hour >= Math.floor(start) && weather.hour < end);
+  const weatherScore = relevantWeather.length ? Math.min(...relevantWeather.map((weather) => weather.score)) : 0;
+  const eventHour = hourFromTime(event?.time);
+  // 来場者が周辺へ流れる可能性がある、開始後2〜4時間を補正対象にする。
+  const eventEffectOverlaps = eventHour !== null && eventHour + 2 < end && eventHour + 4 > start;
+  const delta = crowdDelta(weatherScore + (eventEffectOverlaps ? 0.95 : 0));
+  return {
+    summary: delta === 0 ? 'いつも通り' : `通常より${crowdText(delta)}`,
+    eventEffectOverlaps,
+  };
 }
 
 async function buildDailyLineMessage(date) {
@@ -140,15 +155,16 @@ async function buildDailyLineMessage(date) {
   if (weekday === 0) return `${lineDateLabel(date)}のSPAGO\n\n本日は定休日です。\n来週の予報は日曜朝にお送りします。`;
   const [weather, venues] = await Promise.all([getWeather(), getVenues()]);
   const slots = weather.hourly.filter((slot) => slot.date === date && [11, 13, 15, 17, 19, 21].includes(slot.hour));
-  const weatherScore = slots.length ? Math.min(...slots.map((slot) => slot.score)) : 0;
   const events = venues.events.filter((item) => item.date === date);
   const event = events[0];
-  const score = weatherScore + (event?.time ? 0.95 : 0);
-  const delta = crowdDelta(score);
+  const baseline = baselineFor(date);
+  const [lunch, afternoon, night] = baseline;
+  const lunchForecast = periodForecast(lunch, slots, event);
+  const nightForecast = periodForecast(night, slots, event);
+  const weatherScore = slots.length ? Math.min(...slots.map((slot) => slot.score)) : 0;
   const weatherSlot = slots.find((slot) => slot.score === weatherScore) || slots[0];
-  const summary = delta === 0 ? 'いつも通り' : `通常より${crowdText(delta)}`;
   const eventTime = event?.time ? Number(event.time.slice(0, 2)) : null;
-  const attentionTime = eventTime && delta > 0
+  const attentionTime = eventTime
     ? `${String(eventTime + 2).padStart(2, '0')}:00〜${String(eventTime + 4).padStart(2, '0')}:00`
     : event && !event.time ? 'イベント時刻を確認中'
       : '特になし';
@@ -156,38 +172,28 @@ async function buildDailyLineMessage(date) {
   const lines = [
     `${lineDateLabel(date)}｜SPAGO混雑予報`,
     '',
-    `今日の変動　${summary}（${delta > 0 ? '+' : ''}${delta}）`,
-    `外部要因の注意時間　${attentionTime}`,
-    '',
     `営業時間　${store.openingHours}`,
-    '通常パターン',
-    baselineLine(date),
+    '',
+    `ランチ｜${lunch.time}`,
+    `普段　${lunch.level}`,
+    `予報　${lunchForecast.summary}`,
+    '',
+    `午後｜${afternoon.time}`,
+    `普段　${afternoon.level}`,
+    '',
+    `夜｜${night.time}`,
+    `普段　${night.level}`,
+    `予報　${nightForecast.summary}`,
     '',
     `天気　${weatherSlot ? `${weatherSlot.label} / ${Math.round(weatherSlot.temperature)}°C` : '取得中'}`,
     `影響　${weatherImpact}`,
   ];
   lines.push('', '近隣イベント');
-  if (event) lines.push(`・${event.venue} ${event.time ? `${event.time}開始` : '時刻確認中'}`);
+  if (event) lines.push(`・${event.venue} ${event.time ? `${event.time}開始 / 注意 ${attentionTime}` : '時刻確認中'}`);
   else lines.push('・大きく影響しそうなイベントはありません');
   if (event && !event.time) lines.push('※ 開始・終了時刻の確認後に、混雑時間へ反映します。');
+  if (lunchForecast.eventEffectOverlaps || nightForecast.eventEffectOverlaps) lines.push('※ イベントの影響は該当する時間帯の予報に反映しています。');
   lines.push('', '確度　中');
-  return lines.join('\n');
-}
-
-async function buildPeriodLineMessage(date, period) {
-  const slots = baselineFor(date);
-  if (!slots.length) return `${lineDateLabel(date)}のSPAGO\n\n本日は定休日です。`;
-  const target = period === 'lunch' ? slots[0] : slots.at(-1);
-  const daily = await buildDailyLineMessage(date);
-  const lines = [
-    `${lineDateLabel(date)}｜SPAGO ${period === 'lunch' ? 'ランチ' : '夜'}予報`,
-    '',
-    `営業時間　${store.openingHours}`,
-    `${target.time}　${target.level}`,
-    `通常の傾向：${target.note}`,
-  ];
-  const notable = daily.split('\n').find((line) => line.startsWith('今日の変動'));
-  if (notable) lines.push('', notable);
   return lines.join('\n');
 }
 
@@ -202,8 +208,8 @@ async function buildWeeklyLineMessage() {
     }
     if (weekday === 6) lines.push(`${lineDateLabel(date)}　通常：週で最も混みやすい日`);
     const message = await buildDailyLineMessage(date);
-    const change = message.split('\n').find((line) => line.startsWith('今日の変動')) || '今日の変動　確認中';
-    if (!change.includes('いつも通り')) lines.push(`${lineDateLabel(date)}　${change.replace('今日の変動　', '')}`);
+    const lunchForecast = message.split('\n').find((line) => line.startsWith('予報　')) || '予報　確認中';
+    if (!lunchForecast.includes('いつも通り')) lines.push(`${lineDateLabel(date)} ランチ　${lunchForecast.replace('予報　', '')}`);
   }
   return lines.length === 1 ? `${lines[0]}\n\n現在、大きな変動要因は確認されていません。` : lines.join('\n');
 }
@@ -238,8 +244,6 @@ async function replyLine(replyToken, text) {
           { type: 'action', action: { type: 'message', label: '今日', text: '今日' } },
           { type: 'action', action: { type: 'message', label: '明日', text: '明日' } },
           { type: 'action', action: { type: 'message', label: '今週', text: '今週' } },
-          { type: 'action', action: { type: 'message', label: 'ランチ', text: 'ランチ' } },
-          { type: 'action', action: { type: 'message', label: '夜', text: '夜' } },
         ],
       },
     }],
@@ -272,14 +276,10 @@ async function handleLineEvent(event) {
     await replyLine(event.replyToken, await buildDailyLineMessage(japanDate()));
   } else if (input.includes('明日') || input.includes('あした')) {
     await replyLine(event.replyToken, await buildDailyLineMessage(japanDate(1)));
-  } else if (input.includes('ランチ') || input.includes('昼')) {
-    await replyLine(event.replyToken, await buildPeriodLineMessage(japanDate(), 'lunch'));
-  } else if (input.includes('夜') || input.includes('ディナー')) {
-    await replyLine(event.replyToken, await buildPeriodLineMessage(japanDate(), 'night'));
   } else if (input.includes('今週') || input.includes('来週')) {
     await replyLine(event.replyToken, await buildWeeklyLineMessage());
   } else {
-    await replyLine(event.replyToken, '「今日」「明日」「今週」「ランチ」「夜」と送ると、SPAGOの混雑予報を返します。');
+    await replyLine(event.replyToken, '「今日」「明日」「今週」と送ると、SPAGOの混雑予報を返します。ランチと夜の予報は「今日」「明日」の中に表示されます。');
   }
 }
 
@@ -477,11 +477,7 @@ createServer(async (request, response) => {
     try {
       const period = new URL(request.url, `http://${request.headers.host}`).searchParams.get('period');
       const today = japanDate();
-      const text = period === 'week'
-        ? await buildWeeklyLineMessage()
-        : period === 'lunch' || period === 'night'
-          ? await buildPeriodLineMessage(today, period)
-          : await buildDailyLineMessage(today);
+      const text = period === 'week' ? await buildWeeklyLineMessage() : await buildDailyLineMessage(today);
       sendJson(response, { text });
     } catch (error) {
       sendJson(response, { error: 'LINE通知文を生成できませんでした。', detail: error.message }, 502);
