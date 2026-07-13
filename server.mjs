@@ -1,10 +1,12 @@
 import { createReadStream, existsSync, statSync } from 'node:fs';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 
 const root = process.cwd();
 const port = Number(process.env.PORT || 4173);
+const feedbackFile = join(root, 'data', 'feedback.json');
 const store = {
   name: 'SPAGO 原宿',
   latitude: 35.6757,
@@ -18,6 +20,7 @@ const cache = {
   venues: { value: null, expiresAt: 0 },
 };
 const processedLineEvents = new Set();
+let feedbackCache = null;
 const lineConfig = {
   channelSecret: process.env.LINE_CHANNEL_SECRET || '',
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || '',
@@ -112,6 +115,35 @@ function crowdDelta(score) {
   if (score < 0.4) return 0;
   if (score < 1.25) return 1;
   return 2;
+}
+
+const feedbackPeriods = [
+  { id: 'lunch', label: 'ランチ', time: '11:30〜14:00' },
+  { id: 'afternoon', label: '午後', time: '14:00〜17:00' },
+  { id: 'night', label: '夜', time: '17:00〜21:00' },
+];
+
+async function loadFeedback() {
+  if (feedbackCache) return feedbackCache;
+  try {
+    const saved = JSON.parse(await readFile(feedbackFile, 'utf8'));
+    feedbackCache = Array.isArray(saved) ? saved : [];
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    feedbackCache = [];
+  }
+  return feedbackCache;
+}
+
+async function saveFeedback(record) {
+  const feedback = await loadFeedback();
+  const existingIndex = feedback.findIndex((item) => item.date === record.date && item.period === record.period && item.sourceId === record.sourceId);
+  if (existingIndex >= 0) feedback[existingIndex] = record;
+  else feedback.push(record);
+  await mkdir(join(root, 'data'), { recursive: true });
+  const temporaryFile = `${feedbackFile}.${process.pid}.tmp`;
+  await writeFile(temporaryFile, JSON.stringify(feedback, null, 2), 'utf8');
+  await rename(temporaryFile, feedbackFile);
 }
 
 function baselineFor(date) {
@@ -233,10 +265,36 @@ async function callLine(endpoint, body) {
   return { sent: true };
 }
 
+function feedbackQuickReplies(date, period) {
+  return [
+    { label: '空いていた', value: -1 },
+    { label: 'いつも通り', value: 0 },
+    { label: '混んでいた', value: 1 },
+  ].map(({ label, value }) => ({
+    type: 'action',
+    action: {
+      type: 'postback',
+      label,
+      displayText: `${period.label}：${label}`,
+      data: new URLSearchParams({ action: 'feedback', date, period: period.id, level: String(value) }).toString(),
+    },
+  }));
+}
+
+function buildFeedbackMessage(date, period, prefix = '') {
+  return {
+    type: 'text',
+    text: `${prefix}${lineDateLabel(date)}の実際の混雑を教えてください。\n\n${period.label}（${period.time}）はどうでしたか？`,
+    quickReply: { items: feedbackQuickReplies(date, period) },
+  };
+}
+
+async function replyLineMessage(replyToken, message) {
+  return callLine('reply', { replyToken, messages: [message] });
+}
+
 async function replyLine(replyToken, text) {
-  return callLine('reply', {
-    replyToken,
-    messages: [{
+  return replyLineMessage(replyToken, {
       type: 'text',
       text,
       quickReply: {
@@ -246,7 +304,6 @@ async function replyLine(replyToken, text) {
           { type: 'action', action: { type: 'message', label: '今週', text: '今週' } },
         ],
       },
-    }],
   });
 }
 
@@ -262,12 +319,41 @@ async function sendMorningLine(text) {
   return lineConfig.destinationId ? pushLine(lineConfig.destinationId, text) : broadcastLine(text);
 }
 
+async function sendFeedbackLine(message) {
+  if (lineConfig.destinationId) return callLine('push', { to: lineConfig.destinationId, messages: [message] });
+  return callLine('broadcast', { messages: [message] });
+}
+
 async function handleLineEvent(event) {
   if (!event.webhookEventId || processedLineEvents.has(event.webhookEventId)) return;
   processedLineEvents.add(event.webhookEventId);
   if (processedLineEvents.size > 1000) processedLineEvents.clear();
   if (event.type === 'postback' && event.replyToken) {
-    await replyLine(event.replyToken, '記録しました。予報の補正に活用します。');
+    const data = new URLSearchParams(event.postback?.data || '');
+    if (data.get('action') !== 'feedback') {
+      await replyLine(event.replyToken, '記録しました。予報の補正に活用します。');
+      return;
+    }
+    const periodIndex = feedbackPeriods.findIndex((period) => period.id === data.get('period'));
+    const level = Number(data.get('level'));
+    const date = data.get('date');
+    if (periodIndex < 0 || !date || ![-1, 0, 1].includes(level)) {
+      await replyLine(event.replyToken, '回答を読み取れませんでした。もう一度お試しください。');
+      return;
+    }
+    await saveFeedback({
+      date,
+      period: feedbackPeriods[periodIndex].id,
+      level,
+      sourceId: event.source?.userId || event.source?.groupId || 'line-user',
+      answeredAt: new Date().toISOString(),
+    });
+    const nextPeriod = feedbackPeriods[periodIndex + 1];
+    if (nextPeriod) {
+      await replyLineMessage(event.replyToken, buildFeedbackMessage(date, nextPeriod, `${feedbackPeriods[periodIndex].label}を記録しました。ありがとうございます。\n\n`));
+    } else {
+      await replyLine(event.replyToken, '今日の振り返りを記録しました。ありがとうございます。明日の予報づくりに活用します。');
+    }
     return;
   }
   if (event.type !== 'message' || event.message?.type !== 'text' || !event.replyToken) return;
@@ -470,6 +556,7 @@ createServer(async (request, response) => {
       deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast',
       notificationReady: Boolean(lineConfig.channelAccessToken),
       cronReady: Boolean(lineConfig.cronSecret),
+      feedbackStorage: 'temporary-file',
     });
     return;
   }
@@ -482,6 +569,14 @@ createServer(async (request, response) => {
     } catch (error) {
       sendJson(response, { error: 'LINE通知文を生成できませんでした。', detail: error.message }, 502);
     }
+    return;
+  }
+  if (pathname === '/api/line/feedback-preview') {
+    const date = japanDate();
+    sendJson(response, {
+      text: buildFeedbackMessage(date, feedbackPeriods[0]).text,
+      choices: feedbackQuickReplies(date, feedbackPeriods[0]).map((item) => item.action.label),
+    });
     return;
   }
   if (pathname === '/api/jobs/morning' && request.method === 'POST') {
@@ -500,6 +595,27 @@ createServer(async (request, response) => {
       sendJson(response, { ...(await sendMorningLine(text)), date, weekly: isSunday, deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast' });
     } catch (error) {
       sendJson(response, { error: 'LINE朝通知を送信できませんでした。', detail: error.message }, 502);
+    }
+    return;
+  }
+  if (pathname === '/api/jobs/evening-feedback' && request.method === 'POST') {
+    if (!lineConfig.cronSecret || request.headers.authorization !== `Bearer ${lineConfig.cronSecret}`) {
+      sendJson(response, { error: 'Unauthorized' }, 401);
+      return;
+    }
+    if (!lineConfig.channelAccessToken) {
+      sendJson(response, { error: 'LINE_CHANNEL_ACCESS_TOKEN is not configured' }, 503);
+      return;
+    }
+    const date = japanDate();
+    if (new Date(`${date}T12:00:00+09:00`).getDay() === 0) {
+      sendJson(response, { sent: false, skipped: 'closed', date });
+      return;
+    }
+    try {
+      sendJson(response, { ...(await sendFeedbackLine(buildFeedbackMessage(date, feedbackPeriods[0]))), date, deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast' });
+    } catch (error) {
+      sendJson(response, { error: 'LINE振り返り通知を送信できませんでした。', detail: error.message }, 502);
     }
     return;
   }
