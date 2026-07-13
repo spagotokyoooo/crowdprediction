@@ -178,6 +178,14 @@ async function pushLine(to, text) {
   return callLine('push', { to, messages: [{ type: 'text', text }] });
 }
 
+async function broadcastLine(text) {
+  return callLine('broadcast', { messages: [{ type: 'text', text }] });
+}
+
+async function sendMorningLine(text) {
+  return lineConfig.destinationId ? pushLine(lineConfig.destinationId, text) : broadcastLine(text);
+}
+
 async function handleLineEvent(event) {
   if (!event.webhookEventId || processedLineEvents.has(event.webhookEventId)) return;
   processedLineEvents.add(event.webhookEventId);
@@ -383,7 +391,8 @@ createServer(async (request, response) => {
   if (pathname === '/api/line/status') {
     sendJson(response, {
       webhookReady: Boolean(lineConfig.channelSecret),
-      pushReady: Boolean(lineConfig.channelAccessToken && lineConfig.destinationId),
+      deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast',
+      notificationReady: Boolean(lineConfig.channelAccessToken),
       cronReady: Boolean(lineConfig.cronSecret),
     });
     return;
@@ -402,15 +411,15 @@ createServer(async (request, response) => {
       sendJson(response, { error: 'Unauthorized' }, 401);
       return;
     }
-    if (!lineConfig.destinationId) {
-      sendJson(response, { error: 'LINE_DESTINATION_ID is not configured' }, 503);
+    if (!lineConfig.channelAccessToken) {
+      sendJson(response, { error: 'LINE_CHANNEL_ACCESS_TOKEN is not configured' }, 503);
       return;
     }
     try {
       const date = japanDate();
       const isSunday = new Date(`${date}T12:00:00+09:00`).getDay() === 0;
       const text = isSunday ? `${await buildDailyLineMessage(date)}\n\n${await buildWeeklyLineMessage()}` : await buildDailyLineMessage(date);
-      sendJson(response, { ...(await pushLine(lineConfig.destinationId, text)), date, weekly: isSunday });
+      sendJson(response, { ...(await sendMorningLine(text)), date, weekly: isSunday, deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast' });
     } catch (error) {
       sendJson(response, { error: 'LINE朝通知を送信できませんでした。', detail: error.message }, 502);
     }

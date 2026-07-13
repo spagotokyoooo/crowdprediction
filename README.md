@@ -36,7 +36,8 @@ npm run dev
 
 1. `.env.example` を `.env` としてコピーし、LINE Developers Consoleの値を設定する。
 2. 本番の公開URLに `/webhook/line` を付け、LINEのWebhook URLに登録する。
-3. ホスティング側のスケジューラから、毎朝8:00（Asia/Tokyo）に `POST /api/jobs/morning` を呼ぶ。リクエストには `Authorization: Bearer {CRON_SECRET}` を付ける。
+3. `LINE_DESTINATION_ID` を空欄にすると、友だち追加している全員へブロードキャスト通知します。特定のグループ・個人だけに送る場合はIDを設定してください。
+4. ホスティング側のスケジューラから、毎朝8:00（Asia/Tokyo）に `POST /api/jobs/morning` を呼ぶ。リクエストには `Authorization: Bearer {CRON_SECRET}` を付ける。
 
 ローカルで通知文だけ確認する場合は `GET /api/line/preview`、週間版は `GET /api/line/preview?period=week` を利用できます。実際のLINE送信は、アクセストークンと通知先IDを設定するまで実行されません。
 
