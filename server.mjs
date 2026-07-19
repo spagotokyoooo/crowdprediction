@@ -135,9 +135,19 @@ function truncate(text, maxLength = 42) {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
-function eventDescription(event) {
+function eventDescription(event, maxLength = 42) {
   const time = event.time ? ` ${event.time}〜` : '';
-  return `${time}${truncate(event.title)}`;
+  return `${time}${truncate(event.title, maxLength)}`;
+}
+
+function weeklyEventDescription(event) {
+  const compactTitle = event.title
+    .replace(/令和\d+年度\s*/g, '')
+    .replace(/第[〇一二三四五六七八九十百\d]+回/g, '')
+    .replace(/選手権大会/g, '選手権')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return eventDescription({ ...event, title: compactTitle }, 16);
 }
 
 function weatherFlowText(summary, includePrecipitation = false) {
@@ -229,30 +239,20 @@ async function buildWeeklyLineMessage(period = 'current') {
     const info = dailyInfo(weather, venues, date);
     return { date, weather: info.weather, events: eventsByVenue(venues, date) };
   });
-  const highlights = days.filter((day) => day.events.length || weatherNeedsAttention(day.weather) || !day.weather);
-  const lines = [title, '', '注意日'];
-  if (!highlights.length) {
-    lines.push('・イベント予定・荒天の見込みはありません。');
-  }
-  for (const day of highlights) {
-    const labels = [day.events.length ? 'イベント' : '', weatherNeedsAttention(day.weather) ? '天気' : ''].filter(Boolean);
-    lines.push('', `${lineDateLabel(day.date)}｜${labels.join('・') || '天気予報を取得中'}`);
+  const lines = [title];
+  for (const day of days) {
+    lines.push('', lineDateLabel(day.date));
     if (day.events.length) {
       const eventText = day.events
-        .map(({ name, events }) => `${name}：${events.slice(0, 2).map(eventDescription).join(' ／ ')}${events.length > 2 ? ` ／ ほか${events.length - 2}件` : ''}`)
+        .map(({ name, events }) => `🏟 ${name}｜${weeklyEventDescription(events[0])}${events.length > 1 ? ` ほか${events.length - 1}件` : ''}`)
         .join('\n・');
       lines.push(`・${eventText}`);
     }
-    if (weatherNeedsAttention(day.weather)) lines.push(`・天気：${weatherAttentionText(day.weather)}`);
+    if (weatherNeedsAttention(day.weather)) lines.push(`・☔ ${weatherAttentionText(day.weather)}`);
     if (!day.weather) lines.push('・天気予報を取得中');
-  }
-  const regularDays = days.filter((day) => day.weather && !day.events.length && !weatherNeedsAttention(day.weather));
-  if (regularDays.length) {
-    lines.push('', '通常の日');
-    lines.push(...regularDays.map((day) => `・${lineDateLabel(day.date)}：通常どおり`));
+    if (day.weather && !day.events.length && !weatherNeedsAttention(day.weather)) lines.push('・通常どおり');
   }
   const unavailableSources = venues.sources.filter((source) => source.status !== 'connected').map((source) => source.name);
-  lines.push('', '※ イベント予定のない施設は省略しています。');
   if (unavailableSources.length) lines.push(`※ 取得確認中：${unavailableSources.join('、')}`);
   return lines.join('\n');
 }
