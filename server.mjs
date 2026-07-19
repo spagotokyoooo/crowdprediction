@@ -54,25 +54,29 @@ const venueSources = [
     id: 'yoyogi',
     name: '国立代々木競技場',
     url: 'https://www.jpnsport.go.jp/yoyogi/tabid/58/default.aspx',
+    urls: [
+      'https://www.jpnsport.go.jp/yoyogi/event/tabid/59/Default.aspx',
+      'https://www.jpnsport.go.jp/yoyogi/event/tabid/60/Default.aspx',
+    ],
     note: '第一・第二体育館の公式情報',
-    eventCoverage: 'manual',
-    extract: () => [],
+    eventCoverage: 'automated',
+    extract: extractYoyogi,
   },
   {
     id: 'national-stadium',
     name: '国立競技場',
-    url: 'https://www.jpnsport.go.jp/kokuritu/seat/tabid/57/Default.aspx',
+    url: 'https://jns-e.com/event/',
     note: '公式イベント情報',
-    eventCoverage: 'manual',
-    extract: () => [],
+    eventCoverage: 'automated',
+    extract: extractNationalStadium,
   },
   {
     id: 'with-harajuku',
     name: 'WITH HARAJUKU HALL',
     url: 'https://withharajuku.jp/',
     note: 'NEWS & EVENTS',
-    eventCoverage: 'manual',
-    extract: () => [],
+    eventCoverage: 'automated',
+    extract: extractWithHarajuku,
   },
 ];
 
@@ -110,17 +114,21 @@ function lineDateLabel(date) {
 function weatherSummary(weather, date) {
   const daytimeSlots = weather.hourly.filter((slot) => slot.date === date && slot.hour >= 6 && slot.hour <= 21);
   if (!daytimeSlots.length) return null;
-  const noonSlot = daytimeSlots.find((slot) => slot.hour === 12) || daytimeSlots[Math.floor(daytimeSlots.length / 2)];
+  const slotAt = (hour) => daytimeSlots.find((slot) => slot.hour === hour)
+    || daytimeSlots.reduce((nearest, slot) => Math.abs(slot.hour - hour) < Math.abs(nearest.hour - hour) ? slot : nearest);
   return {
-    label: noonSlot.label,
+    flow: [
+      { label: '朝', slot: slotAt(9) },
+      { label: '昼', slot: slotAt(15) },
+      { label: '夜', slot: slotAt(20) },
+    ],
     low: Math.round(Math.min(...daytimeSlots.map((slot) => slot.temperature))),
     high: Math.round(Math.max(...daytimeSlots.map((slot) => slot.temperature))),
-    precipitationProbability: Math.max(...daytimeSlots.map((slot) => slot.precipitationProbability)),
   };
 }
 
 function eventOccursOn(event, date) {
-  return event.date <= date && (!event.endDate || date <= event.endDate);
+  return event.date === date || Boolean(event.endDate && event.date <= date && date <= event.endDate);
 }
 
 function truncate(text, maxLength = 42) {
@@ -150,6 +158,10 @@ function dailyInfo(weather, venues, date) {
 }
 
 async function buildDailyLineMessage(date) {
+  const weekday = new Date(`${date}T12:00:00+09:00`).getDay();
+  if (weekday === 0) {
+    return `${lineDateLabel(date)}｜SPAGO\n\n本日は定休日です。\nゆっくり休んで、また明日からよろしくお願いします。`;
+  }
   const [weather, venues] = await Promise.all([getWeather(), getVenues()]);
   const info = dailyInfo(weather, venues, date);
   const lines = [
@@ -158,8 +170,11 @@ async function buildDailyLineMessage(date) {
     '天気予報',
   ];
   if (info.weather) {
-    lines.push(`・${info.weather.label} / ${info.weather.low}〜${info.weather.high}°C`);
-    lines.push(`・降水確率：最大 ${info.weather.precipitationProbability}%`);
+    const flow = info.weather.flow
+      .map(({ label, slot }) => `${label} ${slot.label} ${Math.round(slot.temperature)}°C${slot.precipitationProbability ? `（雨${slot.precipitationProbability}%）` : ''}`)
+      .join(' → ');
+    lines.push(`・${flow}`);
+    lines.push(`・気温：${info.weather.low}〜${info.weather.high}°C`);
   } else {
     lines.push('・天気予報を取得中');
   }
@@ -190,7 +205,7 @@ async function buildWeeklyLineMessage(period = 'current') {
     const date = japanDate(offset);
     const info = dailyInfo(weather, venues, date);
     const weatherText = info.weather
-      ? `${info.weather.label} / ${info.weather.low}〜${info.weather.high}°C / 雨 ${info.weather.precipitationProbability}%`
+      ? `${info.weather.flow.map(({ label, slot }) => `${label} ${slot.label} ${Math.round(slot.temperature)}°C`).join(' → ')} / ${info.weather.low}〜${info.weather.high}°C`
       : '天気予報を取得中';
     lines.push('', lineDateLabel(date), `天気：${weatherText}`, `イベント：${info.venueStatuses.join('、')}`);
   }
@@ -349,6 +364,31 @@ function toDate(year, month, day) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+function uniqueEvents(events) {
+  return [...new Map(events.map((event) => [`${event.venueId}:${event.date}:${event.title}`, event])).values()];
+}
+
+function datedEventsFromText(text, { venueId, venue, sourceUrl, scale = 'medium' }) {
+  const events = [];
+  const expression = /(20\d{2})\/(\d{1,2})\/(\d{1,2})[（(][^）)]*[）)]\s*([\s\S]{3,160}?)(?=\s+(?:20\d{2}\/\d{1,2}\/\d{1,2}[（(]|来月のイベント|再来月以降のイベント)|$)/g;
+  for (const match of text.matchAll(expression)) {
+    const [, year, month, day, rawTitle] = match;
+    const title = rawTitle.replace(/\s+(?:来月|再来月以降).*$/, '').replace(/\s+/g, ' ').trim();
+    if (!title || title.length < 3) continue;
+    events.push({
+      venueId,
+      venue,
+      date: toDate(Number(year), Number(month), Number(day)),
+      time: null,
+      title,
+      scale,
+      sourceUrl,
+      source: 'official',
+    });
+  }
+  return uniqueEvents(events);
+}
+
 function extractTokyoGymnasium(html) {
   const text = compactText(html);
   const events = [];
@@ -394,12 +434,68 @@ function extractJinguStadium(html) {
   return events.slice(0, 10);
 }
 
+function extractYoyogi(htmlPages) {
+  return uniqueEvents(htmlPages.flatMap((html) => datedEventsFromText(compactText(html), {
+    venueId: 'yoyogi',
+    venue: '国立代々木競技場',
+    sourceUrl: 'https://www.jpnsport.go.jp/yoyogi/tabid/58/default.aspx',
+  }))).slice(0, 40);
+}
+
+function extractNationalStadium(html) {
+  const text = compactText(html);
+  const eventSection = text.slice(Math.max(0, text.indexOf('イベントアーカイブ')));
+  const events = [];
+  const expression = /(?:^|\s)(?:音楽|スポーツ|その他)\s+(.{2,140}?)\s+日程\s+(20\d{2})\s+(\d{1,2})\/(\d{1,2})/g;
+  for (const match of eventSection.matchAll(expression)) {
+    const [, title, year, month, day] = match;
+    events.push({
+      venueId: 'national-stadium',
+      venue: '国立競技場',
+      date: toDate(Number(year), Number(month), Number(day)),
+      time: null,
+      title: title.replace(/\s+/g, ' ').trim(),
+      scale: 'large',
+      sourceUrl: 'https://jns-e.com/event/',
+      source: 'official',
+    });
+  }
+  return uniqueEvents(events);
+}
+
+function extractWithHarajuku(html) {
+  const text = compactText(html);
+  const events = [];
+  const expression = /(20\d{2})年(\d{1,2})月(\d{1,2})日[（(][^）)]*[）)](?:[～〜-](?:(\d{1,2})月)?(\d{1,2})日[（(][^）)]*[）)])?/g;
+  for (const match of text.matchAll(expression)) {
+    const [, year, month, day, endMonth, endDay] = match;
+    const prefix = text.slice(Math.max(0, match.index - 240), match.index);
+    const eventMarker = Math.max(prefix.lastIndexOf(' EVENTS '), prefix.lastIndexOf(' SHOP EVENTS '));
+    if (eventMarker < 0) continue;
+    const title = prefix.slice(eventMarker).replace(/^\s*(?:SHOP )?EVENTS\s+/, '').replace(/◆\s*終了しました\s*◆/g, '').replace(/\s+/g, ' ').trim();
+    if (!title || title.length < 4 || title.includes('毎月19日はウィズ原宿の日')) continue;
+    events.push({
+      venueId: 'with-harajuku',
+      venue: 'WITH HARAJUKU HALL',
+      date: toDate(Number(year), Number(month), Number(day)),
+      endDate: endDay ? toDate(Number(year), Number(endMonth || month), Number(endDay)) : null,
+      time: null,
+      title,
+      scale: 'small',
+      sourceUrl: 'https://withharajuku.jp/',
+      source: 'official',
+    });
+  }
+  return uniqueEvents(events).slice(0, 20);
+}
+
 async function getVenues() {
   if (cache.venues.expiresAt > Date.now()) return cache.venues.value;
   const results = await Promise.all(venueSources.map(async (venue) => {
     try {
-      const html = await getText(venue.url);
-      const events = venue.extract(html);
+      const urls = venue.urls || [venue.url];
+      const pages = await Promise.all(urls.map(getText));
+      const events = venue.extract(pages.length === 1 ? pages[0] : pages);
       return {
         id: venue.id,
         name: venue.name,
