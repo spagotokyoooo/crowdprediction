@@ -140,6 +140,12 @@ function eventDescription(event) {
   return `${time}${truncate(event.title)}`;
 }
 
+function weatherFlowText(summary, includePrecipitation = false) {
+  return summary.flow
+    .map(({ label, slot }) => `${label} ${slot.label} ${Math.round(slot.temperature)}°C${includePrecipitation && slot.precipitationProbability ? `（雨${slot.precipitationProbability}%）` : ''}`)
+    .join(' → ');
+}
+
 function venueStatus(source, date) {
   if (source.status !== 'connected') return `${source.name}：取得確認中`;
   if (source.eventCoverage !== 'automated') return `${source.name}：公式情報を確認中`;
@@ -157,6 +163,18 @@ function dailyInfo(weather, venues, date) {
   };
 }
 
+function eventsByVenue(venues, date) {
+  return venues.sources.flatMap((source) => {
+    if (source.status !== 'connected' || source.eventCoverage !== 'automated') return [];
+    const events = source.events.filter((event) => eventOccursOn(event, date));
+    return events.length ? [{ name: source.name, events }] : [];
+  });
+}
+
+function weatherNeedsAttention(summary) {
+  return Boolean(summary?.flow.some(({ slot }) => slot.precipitationProbability >= 50 || /雨|雷|雪/.test(slot.label)));
+}
+
 async function buildDailyLineMessage(date) {
   const weekday = new Date(`${date}T12:00:00+09:00`).getDay();
   if (weekday === 0) {
@@ -170,10 +188,7 @@ async function buildDailyLineMessage(date) {
     '天気予報',
   ];
   if (info.weather) {
-    const flow = info.weather.flow
-      .map(({ label, slot }) => `${label} ${slot.label} ${Math.round(slot.temperature)}°C${slot.precipitationProbability ? `（雨${slot.precipitationProbability}%）` : ''}`)
-      .join(' → ');
-    lines.push(`・${flow}`);
+    lines.push(`・${weatherFlowText(info.weather, true)}`);
     lines.push(`・気温：${info.weather.low}〜${info.weather.high}°C`);
   } else {
     lines.push('・天気予報を取得中');
@@ -200,15 +215,31 @@ async function buildWeeklyLineMessage(period = 'current') {
   const offsets = weekOffsets(period);
   if (!offsets.length) return `${title}\n\n今週の情報は終了しました。来週の情報は「来週」で確認できます。`;
   const [weather, venues] = await Promise.all([getWeather(), getVenues()]);
-  const lines = [title];
-  for (const offset of offsets) {
+  const days = offsets.map((offset) => {
     const date = japanDate(offset);
     const info = dailyInfo(weather, venues, date);
-    const weatherText = info.weather
-      ? `${info.weather.flow.map(({ label, slot }) => `${label} ${slot.label} ${Math.round(slot.temperature)}°C`).join(' → ')} / ${info.weather.low}〜${info.weather.high}°C`
-      : '天気予報を取得中';
-    lines.push('', lineDateLabel(date), `天気：${weatherText}`, `イベント：${info.venueStatuses.join('、')}`);
+    return { date, weather: info.weather, events: eventsByVenue(venues, date) };
+  });
+  const highlights = days.filter((day) => day.events.length || weatherNeedsAttention(day.weather) || !day.weather);
+  const lines = [title, '', '注意日'];
+  if (!highlights.length) {
+    lines.push('・イベント予定・荒天の見込みはありません。');
   }
+  for (const day of highlights) {
+    const labels = [day.events.length ? 'イベント' : '', weatherNeedsAttention(day.weather) ? '天気' : ''].filter(Boolean);
+    lines.push('', `${lineDateLabel(day.date)}｜${labels.join('・') || '天気予報を取得中'}`);
+    if (day.events.length) {
+      const eventText = day.events
+        .map(({ name, events }) => `${name}：${events.slice(0, 2).map(eventDescription).join(' ／ ')}${events.length > 2 ? ` ／ ほか${events.length - 2}件` : ''}`)
+        .join('\n・');
+      lines.push(`・${eventText}`);
+    }
+    if (weatherNeedsAttention(day.weather)) lines.push(`・天気：${weatherFlowText(day.weather, true)}`);
+    if (!day.weather) lines.push('・天気予報を取得中');
+  }
+  const unavailableSources = venues.sources.filter((source) => source.status !== 'connected').map((source) => source.name);
+  lines.push('', '※ イベント予定のない施設は省略しています。');
+  if (unavailableSources.length) lines.push(`※ 取得確認中：${unavailableSources.join('、')}`);
   return lines.join('\n');
 }
 
