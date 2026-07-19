@@ -306,6 +306,24 @@ async function sendMorningLine(text) {
   return lineConfig.destinationId ? pushLine(lineConfig.destinationId, text) : broadcastLine(text);
 }
 
+function weekdayFor(date) {
+  return new Date(`${date}T12:00:00+09:00`).getDay();
+}
+
+function scheduledMorningNotification(date) {
+  const weekday = weekdayFor(date);
+  if (weekday === 0) return { type: 'weekly', text: () => buildWeeklyLineMessage('next') };
+  if (weekday >= 1 && weekday <= 5) return { type: 'today', text: () => buildDailyLineMessage(date) };
+  return null;
+}
+
+function scheduledEveningNotification(date) {
+  const weekday = weekdayFor(date);
+  if (weekday < 1 || weekday > 5) return null;
+  const tomorrow = japanDate(1);
+  return { type: 'tomorrow', date: tomorrow, text: () => buildDailyLineMessage(tomorrow) };
+}
+
 async function handleLineEvent(event) {
   if (!event.webhookEventId || processedLineEvents.has(event.webhookEventId)) return;
   processedLineEvents.add(event.webhookEventId);
@@ -618,16 +636,44 @@ createServer(async (request, response) => {
       sendJson(response, { error: 'Unauthorized' }, 401);
       return;
     }
+    const date = japanDate();
+    const notification = scheduledMorningNotification(date);
+    if (!notification) {
+      sendJson(response, { sent: false, skipped: true, date, reason: 'Saturday has no scheduled notification' });
+      return;
+    }
     if (!lineConfig.channelAccessToken) {
       sendJson(response, { error: 'LINE_CHANNEL_ACCESS_TOKEN is not configured' }, 503);
       return;
     }
     try {
-      const date = japanDate();
-      const text = await buildDailyLineMessage(date);
-      sendJson(response, { ...(await sendMorningLine(text)), date, weekly: false, deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast' });
+      const text = await notification.text();
+      sendJson(response, { ...(await sendMorningLine(text)), date, type: notification.type, deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast' });
     } catch (error) {
       sendJson(response, { error: 'LINE朝通知を送信できませんでした。', detail: error.message }, 502);
+    }
+    return;
+  }
+  if (pathname === '/api/jobs/evening' && request.method === 'POST') {
+    if (!lineConfig.cronSecret || request.headers.authorization !== `Bearer ${lineConfig.cronSecret}`) {
+      sendJson(response, { error: 'Unauthorized' }, 401);
+      return;
+    }
+    const date = japanDate();
+    const notification = scheduledEveningNotification(date);
+    if (!notification) {
+      sendJson(response, { sent: false, skipped: true, date, reason: 'Weekend has no scheduled notification' });
+      return;
+    }
+    if (!lineConfig.channelAccessToken) {
+      sendJson(response, { error: 'LINE_CHANNEL_ACCESS_TOKEN is not configured' }, 503);
+      return;
+    }
+    try {
+      const text = await notification.text();
+      sendJson(response, { ...(await sendMorningLine(text)), date, targetDate: notification.date, type: notification.type, deliveryMode: lineConfig.destinationId ? 'push' : 'broadcast' });
+    } catch (error) {
+      sendJson(response, { error: 'LINE夜通知を送信できませんでした。', detail: error.message }, 502);
     }
     return;
   }
