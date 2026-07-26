@@ -604,9 +604,9 @@ export async function handler(request, response) {
         return;
       }
       const payload = JSON.parse(rawBody.toString('utf8'));
+      await Promise.allSettled((payload.events || []).map(handleLineEvent));
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.end('{}');
-      Promise.allSettled((payload.events || []).map(handleLineEvent));
     } catch (error) {
       sendJson(response, { error: 'LINE webhookを処理できませんでした。', detail: error.message }, 400);
     }
