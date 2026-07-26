@@ -2,6 +2,7 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const root = process.cwd();
 const port = Number(process.env.PORT || 4173);
@@ -709,7 +710,7 @@ export async function handler(request, response) {
   createReadStream(file).pipe(response);
 }
 
-if (!process.env.VERCEL) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   createServer(handler).listen(port, () => {
     console.log(`SPAGO Crowd Prediction is running at http://localhost:${port}`);
   });
