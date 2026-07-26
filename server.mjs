@@ -592,9 +592,9 @@ async function getVenues() {
   return value;
 }
 
-createServer(async (request, response) => {
+export async function handler(request, response) {
   const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
-  if (pathname === '/webhook/line' && request.method === 'POST') {
+  if ((pathname === '/webhook/line' || pathname === '/api/webhook/line') && request.method === 'POST') {
     try {
       const rawBody = await readBody(request);
       if (!verifyLineSignature(rawBody, request.headers['x-line-signature'])) {
@@ -631,7 +631,7 @@ createServer(async (request, response) => {
     }
     return;
   }
-  if (pathname === '/api/jobs/morning' && request.method === 'POST') {
+  if (pathname === '/api/jobs/morning' && ['GET', 'POST'].includes(request.method)) {
     if (!lineConfig.cronSecret || request.headers.authorization !== `Bearer ${lineConfig.cronSecret}`) {
       sendJson(response, { error: 'Unauthorized' }, 401);
       return;
@@ -707,6 +707,10 @@ createServer(async (request, response) => {
     'Cache-Control': 'no-store',
   });
   createReadStream(file).pipe(response);
-}).listen(port, () => {
-  console.log(`SPAGO Crowd Prediction is running at http://localhost:${port}`);
-});
+}
+
+if (!process.env.VERCEL) {
+  createServer(handler).listen(port, () => {
+    console.log(`SPAGO Crowd Prediction is running at http://localhost:${port}`);
+  });
+}
